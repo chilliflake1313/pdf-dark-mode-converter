@@ -85,6 +85,35 @@
             flex-wrap: wrap;
             margin-bottom: 20px;
         }
+        .preview-tools {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 14px;
+            flex-wrap: wrap;
+        }
+        .zoom-btn {
+            background-color: #2a2a2a;
+            color: #fff;
+            border: 1px solid #444;
+            border-radius: 5px;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .zoom-btn:hover {
+            border-color: #666;
+        }
+        .zoom-btn:focus-visible {
+            outline: 3px solid var(--focus-glow);
+            outline-offset: 2px;
+        }
+        .zoom-label {
+            min-width: 56px;
+            font-weight: bold;
+            color: #ddd;
+        }
         .theme-selector {
             padding: 10px 15px;
             background-color: #2a2a2a;
@@ -217,6 +246,12 @@
             </select>
         </div>
         <input type="file" id="fileInput" class="file-input" accept="application/pdf">
+        <div class="preview-tools" aria-label="Preview zoom controls">
+            <button id="zoomOutBtn" class="zoom-btn" type="button">-</button>
+            <span id="zoomLabel" class="zoom-label">100%</span>
+            <button id="zoomInBtn" class="zoom-btn" type="button">+</button>
+            <button id="zoomResetBtn" class="zoom-btn" type="button">Reset</button>
+        </div>
         <div id="progressContainer" aria-live="polite">
             <div id="progressBar"></div>
             <div id="progressText">0/0</div>
@@ -230,6 +265,12 @@
         let originalPdfData = null;
         let originalFileName = "";
         let currentRenderId = 0;
+        let previewZoom = 1;
+        const MIN_ZOOM = 0.5;
+        const MAX_ZOOM = 2.5;
+        const ZOOM_STEP = 0.1;
+        let pinchStartDistance = null;
+        let pinchStartZoom = 1;
         // Theme definitions
 
         const themes = {
@@ -282,6 +323,35 @@
             document.body.style.backgroundColor = `rgb(${theme.r}, ${theme.g}, ${theme.b})`;
         }
 
+        function updateZoomLabel() {
+            const zoomLabel = document.getElementById('zoomLabel');
+            zoomLabel.textContent = `${Math.round(previewZoom * 100)}%`;
+        }
+
+        function applyPreviewZoom() {
+            const canvases = document.querySelectorAll('#pdfContainer canvas');
+            canvases.forEach(canvas => {
+                const baseWidth = Number(canvas.dataset.baseWidth || canvas.width || 0);
+                if (baseWidth > 0) {
+                    canvas.style.width = `${Math.round(baseWidth * previewZoom)}px`;
+                }
+                canvas.style.height = 'auto';
+            });
+            updateZoomLabel();
+        }
+
+        function setPreviewZoom(nextZoom) {
+            const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, nextZoom));
+            previewZoom = Math.round(clamped * 10) / 10;
+            applyPreviewZoom();
+        }
+
+        function getTouchDistance(touchA, touchB) {
+            const dx = touchA.clientX - touchB.clientX;
+            const dy = touchA.clientY - touchB.clientY;
+            return Math.hypot(dx, dy);
+        }
+
         applyThemeBackground(themes[document.getElementById('themeSelector').value]);
 
         function handleFile(file) {
@@ -330,6 +400,74 @@
 
         document.querySelector('.custom-file-upload').addEventListener('click', () => {
             loadPdfLibraries().catch(() => {});
+        });
+
+        document.getElementById('zoomInBtn').addEventListener('click', () => {
+            setPreviewZoom(previewZoom + ZOOM_STEP);
+        });
+
+        document.getElementById('zoomOutBtn').addEventListener('click', () => {
+            setPreviewZoom(previewZoom - ZOOM_STEP);
+        });
+
+        document.getElementById('zoomResetBtn').addEventListener('click', () => {
+            setPreviewZoom(1);
+        });
+
+        document.getElementById('pdfContainer').addEventListener('wheel', function(event) {
+            if (!event.ctrlKey) return;
+            event.preventDefault();
+            const delta = event.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+            setPreviewZoom(previewZoom + delta);
+        }, { passive: false });
+
+        document.addEventListener('keydown', function(event) {
+            const target = event.target;
+            const isTypingTarget = target && (
+                target.tagName === 'INPUT' ||
+                target.tagName === 'TEXTAREA' ||
+                target.isContentEditable
+            );
+            if (isTypingTarget) return;
+
+            if (!(event.ctrlKey || event.metaKey)) return;
+
+            if (event.key === '+' || event.key === '=' || event.code === 'NumpadAdd') {
+                event.preventDefault();
+                setPreviewZoom(previewZoom + ZOOM_STEP);
+                return;
+            }
+
+            if (event.key === '-' || event.code === 'NumpadSubtract') {
+                event.preventDefault();
+                setPreviewZoom(previewZoom - ZOOM_STEP);
+                return;
+            }
+
+            if (event.key === '0' || event.code === 'Numpad0') {
+                event.preventDefault();
+                setPreviewZoom(1);
+            }
+        });
+
+        document.getElementById('pdfContainer').addEventListener('touchstart', function(event) {
+            if (event.touches.length !== 2) return;
+            pinchStartDistance = getTouchDistance(event.touches[0], event.touches[1]);
+            pinchStartZoom = previewZoom;
+        }, { passive: false });
+
+        document.getElementById('pdfContainer').addEventListener('touchmove', function(event) {
+            if (event.touches.length !== 2 || !pinchStartDistance) return;
+            event.preventDefault();
+            const currentDistance = getTouchDistance(event.touches[0], event.touches[1]);
+            const zoomFactor = currentDistance / pinchStartDistance;
+            setPreviewZoom(pinchStartZoom * zoomFactor);
+        }, { passive: false });
+
+        document.getElementById('pdfContainer').addEventListener('touchend', function(event) {
+            if (event.touches.length < 2) {
+                pinchStartDistance = null;
+            }
         });
 
         async function renderPDF(pdfData) {
@@ -414,8 +552,8 @@
                     
                     // Display preview for the first 20 pages only
                     if (i < 20) {
-                        canvas.style.maxWidth = '100%';
-                        canvas.style.height = 'auto';
+                        const containerWidth = pdfContainer.clientWidth || viewport.width;
+                        canvas.dataset.baseWidth = String(Math.min(containerWidth, viewport.width));
                         pdfContainer.appendChild(canvas);
                     }
 
@@ -479,6 +617,7 @@
             if (renderId !== currentRenderId) return;
             
             progressContainer.style.display = 'none';
+            applyPreviewZoom();
             triggerDownload();
         }
 
@@ -499,6 +638,7 @@
         }
 
         document.getElementById('downloadBtn').addEventListener('click', triggerDownload);
+        updateZoomLabel();
     </script>
 </body>
 </html>
